@@ -1,5 +1,7 @@
 import os
 import re
+import sys
+import numpy as np
 import essentia
 import essentia.standard as es
 from mutagen import File
@@ -11,11 +13,19 @@ essentia.log.warningActive = False
 essentia.log.infoActive = False
 
 LIBRARY_PATH = '/Users/jacobhaynes/Library/CloudStorage/GoogleDrive-jacobhaynes49@gmail.com/My Drive/Music'
+MODELS_DIR = os.path.join(os.path.dirname(__file__), 'models')
 NUM_WORKERS = 10
 MUSIC_EXTENSIONS = ('.mp3', '.aiff', '.aif', '.wav')
 
-VALID_COMM_PATTERN = re.compile(r'^(PEAK|INTENSE|GROOVE|MODERN|HYPNOTIC|DEEP) \| D: \d+\.\d{2}$')
-VALID_TIT3_PATTERN = re.compile(r'^E: \d+\.\d$')
+REQUIRED_MODELS = [
+    "discogs-effnet-bs64-1.pb",
+    "mood_party-discogs-effnet-1.pb",
+    "mood_aggressive-discogs-effnet-1.pb",
+    "mood_relaxed-discogs-effnet-1.pb",
+]
+
+VALID_COMM_PATTERN = re.compile(r'^(PEAK|HARD|FLOOR|HYPNOTIC|LATE|DRIVE) \| P: \d+\.\d{2}$')
+VALID_TIT3_PATTERN = re.compile(r'^E: \d+\.\d{2}$')
 
 worker_models = {}
 
@@ -23,7 +33,19 @@ worker_models = {}
 def init_worker():
     essentia.log.warningActive = False
     essentia.log.infoActive = False
-    worker_models['extractor'] = es.MusicExtractor(lowlevelStats=['mean'])
+    worker_models['loader'] = es.MonoLoader(sampleRate=16000)
+    worker_models['extractor'] = es.MusicExtractor(lowlevelStats=['mean'], rhythmStats=['mean'])
+    worker_models['embeddings'] = es.TensorflowPredictEffnetDiscogs(
+        graphFilename=os.path.join(MODELS_DIR, "discogs-effnet-bs64-1.pb"), output="PartitionedCall:1")
+    worker_models['mood_party'] = es.TensorflowPredict2D(
+        graphFilename=os.path.join(MODELS_DIR, "mood_party-discogs-effnet-1.pb"),
+        output="model/Softmax")
+    worker_models['mood_aggressive'] = es.TensorflowPredict2D(
+        graphFilename=os.path.join(MODELS_DIR, "mood_aggressive-discogs-effnet-1.pb"),
+        output="model/Softmax")
+    worker_models['mood_relaxed'] = es.TensorflowPredict2D(
+        graphFilename=os.path.join(MODELS_DIR, "mood_relaxed-discogs-effnet-1.pb"),
+        output="model/Softmax")
 
 
 def _tags_are_valid(audio):
@@ -45,11 +67,18 @@ def repair_track(file_path):
         if _tags_are_valid(audio):
             return {"filename": os.path.basename(file_path), "status": "skipped"}
 
+        worker_models['loader'].configure(filename=file_path, sampleRate=16000)
+        audio_data = worker_models['loader']()
+
         features, _ = worker_models['extractor'](file_path)
-        danceability = features['rhythm.danceability']
-        energy = features['lowlevel.average_loudness']
-        vibe = get_vibe(energy, danceability)
+        energy = features['rhythm.beats_loudness.mean']
         current_genre = os.path.basename(os.path.dirname(file_path))
+
+        activations = worker_models['embeddings'](audio_data)
+        party = float(np.mean(worker_models['mood_party'](activations), axis=0)[1])
+        aggressive = float(np.mean(worker_models['mood_aggressive'](activations), axis=0)[1])
+        relaxed = float(np.mean(worker_models['mood_relaxed'](activations), axis=0)[1])
+        vibe = get_vibe(party, aggressive, relaxed)
 
         if audio is None:
             return {"filename": os.path.basename(file_path), "status": "error", "error": "Not a supported audio file"}
@@ -61,8 +90,8 @@ def repair_track(file_path):
                 del audio.tags[key]
 
         audio.tags["TCON"] = TCON(encoding=3, text=[current_genre])
-        audio.tags["TIT3"] = TIT3(encoding=3, text=[f"E: {energy:.1f}"])
-        audio.tags["COMM::eng"] = COMM(encoding=3, lang='eng', desc='', text=[f"{vibe} | D: {danceability:.2f}"])
+        audio.tags["TIT3"] = TIT3(encoding=3, text=[f"E: {energy:.2f}"])
+        audio.tags["COMM::eng"] = COMM(encoding=3, lang='eng', desc='', text=[f"{vibe} | P: {party:.2f}"])
         audio.save(v2_version=3)
 
         return {"filename": os.path.basename(file_path), "status": "repaired", "vibe": vibe, "energy": energy}
@@ -71,6 +100,12 @@ def repair_track(file_path):
 
 
 if __name__ == "__main__":
+    missing = [m for m in REQUIRED_MODELS if not os.path.exists(os.path.join(MODELS_DIR, m))]
+    if missing:
+        print(f"❌ Missing models: {', '.join(missing)}")
+        print("Run dj_organiser.py once to download all required models.")
+        sys.exit(1)
+
     print("🔍 Scanning library for tracks with malformed tags...")
     files = [
         os.path.join(r, f)
@@ -92,7 +127,7 @@ if __name__ == "__main__":
             percent = (i / total) * 100
             if res['status'] == "repaired":
                 repaired += 1
-                print(f"[{percent:.1f}%] ({i}/{total}) 🔧 {res['vibe']} | E: {res['energy']:.1f} | {res['filename']}")
+                print(f"[{percent:.1f}%] ({i}/{total}) 🔧 {res['vibe']} | E: {res['energy']:.2f} | {res['filename']}")
             elif res['status'] == "skipped":
                 skipped += 1
             else:

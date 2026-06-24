@@ -3,13 +3,19 @@ import subprocess
 import urllib.request
 
 
-def get_vibe(energy, dance):
-    if energy > 0.7:
-        return "PEAK" if dance > 1.2 else "INTENSE"
-    elif energy > 0.4:
-        return "GROOVE" if dance > 1.2 else "MODERN"
+def get_vibe(party, aggressive, relaxed):
+    if party > 0.6 and aggressive > 0.5:
+        return "PEAK"
+    elif aggressive > 0.5 and party <= 0.4:
+        return "HARD"
+    elif party > 0.6:
+        return "FLOOR"
+    elif relaxed > 0.5 and party > 0.3:
+        return "HYPNOTIC"
+    elif relaxed > 0.5:
+        return "LATE"
     else:
-        return "HYPNOTIC" if dance > 1.2 else "DEEP"
+        return "DRIVE"
 
 
 def convert_wav_to_aiff(file_path):
@@ -25,7 +31,6 @@ def convert_wav_to_aiff(file_path):
     )
     if result.returncode == 0 and os.path.exists(aiff_path) and os.path.getsize(aiff_path) > 0:
         return aiff_path
-    # Clean up a partial/zero-byte output if conversion failed
     if os.path.exists(aiff_path) and os.path.getsize(aiff_path) == 0:
         os.remove(aiff_path)
     return file_path

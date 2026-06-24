@@ -1,7 +1,6 @@
 import os
 import json
 import shutil
-import subprocess
 import numpy as np
 import essentia
 import essentia.standard as es
@@ -20,9 +19,12 @@ MODELS_DIR = os.path.join(os.path.dirname(__file__), 'models')
 NUM_WORKERS = 10
 
 MODEL_URLS = {
+    "embeddings_pb": "https://essentia.upf.edu/models/feature-extractors/discogs-effnet/discogs-effnet-bs64-1.pb",
     "genre_pb": "https://essentia.upf.edu/models/classification-heads/genre_discogs400/genre_discogs400-discogs-effnet-1.pb",
     "genre_json": "https://essentia.upf.edu/models/classification-heads/genre_discogs400/genre_discogs400-discogs-effnet-1.json",
-    "embeddings_pb": "https://essentia.upf.edu/models/feature-extractors/discogs-effnet/discogs-effnet-bs64-1.pb"
+    "mood_party_pb": "https://essentia.upf.edu/models/classification-heads/mood_party/mood_party-discogs-effnet-1.pb",
+    "mood_aggressive_pb": "https://essentia.upf.edu/models/classification-heads/mood_aggressive/mood_aggressive-discogs-effnet-1.pb",
+    "mood_relaxed_pb": "https://essentia.upf.edu/models/classification-heads/mood_relaxed/mood_relaxed-discogs-effnet-1.pb",
 }
 
 worker_models = {}
@@ -38,9 +40,16 @@ def init_worker():
         graphFilename=os.path.join(MODELS_DIR, "discogs-effnet-bs64-1.pb"), output="PartitionedCall:1")
     worker_models['genre'] = es.TensorflowPredict2D(
         graphFilename=os.path.join(MODELS_DIR, "genre_discogs400-discogs-effnet-1.pb"),
-        input="serving_default_model_Placeholder",
-        output="PartitionedCall:0"
-    )
+        input="serving_default_model_Placeholder", output="PartitionedCall:0")
+    worker_models['mood_party'] = es.TensorflowPredict2D(
+        graphFilename=os.path.join(MODELS_DIR, "mood_party-discogs-effnet-1.pb"),
+        output="model/Softmax")
+    worker_models['mood_aggressive'] = es.TensorflowPredict2D(
+        graphFilename=os.path.join(MODELS_DIR, "mood_aggressive-discogs-effnet-1.pb"),
+        output="model/Softmax")
+    worker_models['mood_relaxed'] = es.TensorflowPredict2D(
+        graphFilename=os.path.join(MODELS_DIR, "mood_relaxed-discogs-effnet-1.pb"),
+        output="model/Softmax")
 
 
 def analyze_track(file_path):
@@ -51,18 +60,22 @@ def analyze_track(file_path):
         audio = worker_models['loader']()
 
         features, _ = worker_models['extractor'](file_path)
-        danceability = features['rhythm.danceability']
-        energy = features['lowlevel.average_loudness']
-        vibe = get_vibe(energy, danceability)
+        energy = features['rhythm.beats_loudness.mean']
 
+        # Shared EffNet embeddings — reused for genre and all three mood heads
         activations = worker_models['embeddings'](audio)
-        predictions = worker_models['genre'](activations)
-        mean_predictions = np.mean(predictions, axis=0)
 
-        top_index = np.argmax(mean_predictions)
-        top_genre = worker_models['labels'][top_index]
+        # Genre
+        genre_preds = worker_models['genre'](activations)
+        top_genre = worker_models['labels'][np.argmax(np.mean(genre_preds, axis=0))]
         if "---" in top_genre:
             top_genre = top_genre.split("---")[-1]
+
+        # Mood — two-class softmax [non_X, X]; take index 1 for the positive probability
+        party = float(np.mean(worker_models['mood_party'](activations), axis=0)[1])
+        aggressive = float(np.mean(worker_models['mood_aggressive'](activations), axis=0)[1])
+        relaxed = float(np.mean(worker_models['mood_relaxed'](activations), axis=0)[1])
+        vibe = get_vibe(party, aggressive, relaxed)
 
         current_file_path = file_path
         if file_path.lower().endswith('.wav'):
@@ -70,7 +83,7 @@ def analyze_track(file_path):
             if converted != file_path:
                 current_file_path = converted
                 filename = os.path.basename(converted)
-                wav_to_delete = file_path  # defer deletion until after save
+                wav_to_delete = file_path
 
         audio_file = File(current_file_path)
         if audio_file is None:
@@ -84,11 +97,10 @@ def analyze_track(file_path):
                 del audio_file.tags[key]
 
         audio_file.tags["TCON"] = TCON(encoding=3, text=[top_genre])
-        audio_file.tags["TIT3"] = TIT3(encoding=3, text=[f"E: {energy:.1f}"])
-        audio_file.tags["COMM::eng"] = COMM(encoding=3, lang='eng', desc='', text=[f"{vibe} | D: {danceability:.2f}"])
+        audio_file.tags["TIT3"] = TIT3(encoding=3, text=[f"E: {energy:.2f}"])
+        audio_file.tags["COMM::eng"] = COMM(encoding=3, lang='eng', desc='', text=[f"{vibe} | P: {party:.2f}"])
         audio_file.save(v2_version=3)
 
-        # Safe to remove the source WAV now that the AIFF is fully tagged
         if wav_to_delete:
             os.remove(wav_to_delete)
 

@@ -5,7 +5,7 @@ An AI-powered music organization toolset designed for DJs. This project uses mac
 ## Features
 
 - **Automated Genre Classification:** Uses the `discogs-effnet` model to predict genres from the Discogs-400 dataset.
-- **Vibe Analysis:** Calculates energy and danceability scores to categorize tracks into vibes (PEAK, INTENSE, GROOVE, MODERN, HYPNOTIC, DEEP).
+- **Vibe Analysis:** Uses ML mood models (party, aggressive, relaxed) to categorize tracks into vibes (PEAK, HARD, FLOOR, HYPNOTIC, LATE, DRIVE).
 - **Auto-Tagging:** Writes analysis results directly to file metadata (ID3 tags) including Genre, Subtitle, and Comments.
 - **Library Organization:** Automatically sorts files into genre-based folders.
 - **Parallel Processing:** Utilizes multiple CPU cores for fast analysis of large music libraries.
@@ -18,15 +18,15 @@ The primary tool for scanning an unsorted library, predicting genres, tagging fi
 - **Tags Updated:**
   - `TCON` (Genre): Predicted sub-genre.
   - `TIT3` (Subtitle): Energy score (`E: x.x`).
-  - `COMM` (Comment): Vibe label and danceability (`PEAK | D: x.xx`).
+  - `COMM` (Comment): Vibe label and party score (`PEAK | P: x.xx`).
 
 ### 2. `tag_only.py`
 For updating tags on an already organized library without moving files. Uses the existing parent folder name as the genre rather than running AI inference.
 - **Workflow:** Scan -> Analyze -> Tag.
 - **Tags Updated:**
   - `TCON` (Genre): Parent folder name.
-  - `TIT3` (Subtitle): Energy score (`E: x.x`).
-  - `COMM` (Comment): Vibe label and danceability (`PEAK | D: x.xx`).
+  - `TIT3` (Subtitle): Energy score (`E: x.xx`).
+  - `COMM` (Comment): Vibe label and party score (`PEAK | P: x.xx`).
 
 ### 4. `utils.py`
 Shared helpers used by all three scripts: `get_vibe()`, `convert_wav_to_aiff()`, and `download_with_progress()`. Not run directly.
@@ -93,16 +93,16 @@ python tag_repair.py
 3. **Inference (`dj_organiser.py` only):**
    - Audio is passed through the `discogs-effnet` feature extractor to get embeddings.
    - Embeddings are fed into a classification head to predict genres.
-4. **Vibe Logic:** Applied by all three scripts using energy and danceability thresholds:
+4. **Vibe Logic:** Derived from three ML mood classifiers (party, aggressive, relaxed), each returning a 0–1 probability using the same EffNet embeddings already computed for genre — no extra audio processing:
 
-| Vibe | Energy | Danceability |
-|---|---|---|
-| PEAK | High (> 0.7) | High (> 1.2) |
-| INTENSE | High (> 0.7) | Low (≤ 1.2) |
-| GROOVE | Moderate (0.4–0.7) | High (> 1.2) |
-| MODERN | Moderate (0.4–0.7) | Low (≤ 1.2) |
-| HYPNOTIC | Low (≤ 0.4) | High (> 1.2) |
-| DEEP | Low (≤ 0.4) | Low (≤ 1.2) |
+| Vibe | Mood Profile |
+|---|---|
+| PEAK | Party high (> 0.6) + Aggressive high (> 0.5) |
+| HARD | Aggressive high (> 0.5) + Party low (≤ 0.4) |
+| FLOOR | Party high (> 0.6) + Aggressive low |
+| HYPNOTIC | Relaxed high (> 0.5) + Party moderate (> 0.3) |
+| LATE | Relaxed high (> 0.5) + Party low |
+| DRIVE | Everything moderate (default) |
 
 ## Rekordbox Integration
 
