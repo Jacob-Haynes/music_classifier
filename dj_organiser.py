@@ -73,7 +73,7 @@ def analyze_track(file_path):
 
         # Mood — two-class softmax [non_X, X]; take index 1 for the positive probability
         party = float(np.mean(worker_models['mood_party'](activations), axis=0)[1])
-        aggressive = float(np.mean(worker_models['mood_aggressive'](activations), axis=0)[1])
+        aggressive = float(np.mean(worker_models['mood_aggressive'](activations), axis=0)[0])
         relaxed = float(np.mean(worker_models['mood_relaxed'](activations), axis=0)[1])
         vibe = get_vibe(party, aggressive, relaxed)
 
