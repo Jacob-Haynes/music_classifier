@@ -1,23 +1,22 @@
 import os
-import urllib.request
 import json
 import shutil
+import subprocess
 import numpy as np
 import essentia
 import essentia.standard as es
-from mutagen.id3 import ID3, TCON, TXXX, COMM, TIT3, ID3NoHeaderError
+from mutagen.id3 import TCON, COMM, TIT3
 from mutagen import File
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool
+from utils import get_vibe, convert_wav_to_aiff, download_with_progress
 
-# Silence Essentia
 essentia.log.warningActive = False
 essentia.log.infoActive = False
 
 # --- CONFIGURATION ---
 LIBRARY_PATH = '/Users/jacobhaynes/Library/CloudStorage/GoogleDrive-jacobhaynes49@gmail.com/My Drive/Music to sort'
 DESTINATION_PATH = '/Users/jacobhaynes/Library/CloudStorage/GoogleDrive-jacobhaynes49@gmail.com/My Drive/Music'
-MODELS_DIR = './models'
-# Use about half your available cores to stay safe/fast
+MODELS_DIR = os.path.join(os.path.dirname(__file__), 'models')
 NUM_WORKERS = 10
 
 MODEL_URLS = {
@@ -26,15 +25,12 @@ MODEL_URLS = {
     "embeddings_pb": "https://essentia.upf.edu/models/feature-extractors/discogs-effnet/discogs-effnet-bs64-1.pb"
 }
 
-# Global dictionary to hold models for each worker process
 worker_models = {}
 
 
 def init_worker():
-    """Initializes the AI models once for each worker process."""
     with open(os.path.join(MODELS_DIR, "genre_discogs400-discogs-effnet-1.json"), 'r') as f:
         metadata = json.load(f)
-
     worker_models['labels'] = metadata['classes']
     worker_models['loader'] = es.MonoLoader(sampleRate=16000)
     worker_models['extractor'] = es.MusicExtractor(lowlevelStats=['mean'], rhythmStats=['mean'], tonalStats=['mean'])
@@ -47,57 +43,35 @@ def init_worker():
     )
 
 
-def get_vibe(energy, dance):
-    """Translates energy/danceability scores into a human-readable vibe word."""
-    if energy > 0.7:
-        return "PEAK" if dance > 1.2 else "INTENSE"
-    elif energy > 0.4:
-        return "GROOVE" if dance > 1.2 else "MODERN"
-    else:
-        return "HYPNOTIC" if dance > 1.2 else "DEEP"
-
-
 def analyze_track(file_path):
-    """The function each worker runs for a single track."""
     filename = os.path.basename(file_path)
+    wav_to_delete = None
     try:
-        # Load audio (Resampled to 16kHz)
         worker_models['loader'].configure(filename=file_path, sampleRate=16000)
         audio = worker_models['loader']()
 
-        # Extract features
         features, _ = worker_models['extractor'](file_path)
         danceability = features['rhythm.danceability']
         energy = features['lowlevel.average_loudness']
         vibe = get_vibe(energy, danceability)
 
-        # AI Genre Inference
         activations = worker_models['embeddings'](audio)
         predictions = worker_models['genre'](activations)
         mean_predictions = np.mean(predictions, axis=0)
 
         top_index = np.argmax(mean_predictions)
         top_genre = worker_models['labels'][top_index]
-        # Strip the "MainGenre---" prefix and just keep the specific sub-genre
         if "---" in top_genre:
             top_genre = top_genre.split("---")[-1]
-        confidence = mean_predictions[top_index] * 100
 
         current_file_path = file_path
-        # If it's a WAV, convert to AIFF for better Rekordbox compatibility
         if file_path.lower().endswith('.wav'):
-            aiff_path = file_path.rsplit('.', 1)[0] + '.aif'
-            # afconvert is native to macOS. Use BEI24 for AIFF data format.
-            try:
-                os.system(f'afconvert -f AIFF -d BEI24 "{file_path}" "{aiff_path}"')
-                if os.path.exists(aiff_path):
-                    os.remove(file_path)
-                    current_file_path = aiff_path
-                    filename = os.path.basename(aiff_path)
-            except Exception:
-                pass # Fallback to original file if conversion fails
+            converted = convert_wav_to_aiff(file_path)
+            if converted != file_path:
+                current_file_path = converted
+                filename = os.path.basename(converted)
+                wav_to_delete = file_path  # defer deletion until after save
 
-        # Tag the file using mutagen.File for multi-format support (MP3, WAV, AIFF)
         audio_file = File(current_file_path)
         if audio_file is None:
             return {"original_path": current_file_path, "filename": filename, "status": "error", "error": "Not a supported audio file"}
@@ -105,21 +79,18 @@ def analyze_track(file_path):
         if audio_file.tags is None:
             audio_file.add_tags()
 
-        # Clean up old/conflicting tags for Rekordbox
-        # We delete TIT1/TIT3 and any COMM frames to ensure a clean overwrite
         for key in list(audio_file.tags.keys()):
             if key.startswith("TIT1") or key.startswith("TIT3") or key.startswith("COMM"):
                 del audio_file.tags[key]
 
-        # Update tags using ID3 frames (Mutagen maps these correctly for AIFF/WAV)
         audio_file.tags["TCON"] = TCON(encoding=3, text=[top_genre])
         audio_file.tags["TIT3"] = TIT3(encoding=3, text=[f"E: {energy:.1f}"])
-        # desc='' is essential for Rekordbox to show the comment
-        comment_text = f"{vibe} | D: {danceability:.2f}"
-        audio_file.tags["COMM::eng"] = COMM(encoding=3, lang='eng', desc='', text=[comment_text])
-        
-        # Save with ID3v2.3 for maximum Rekordbox compatibility
+        audio_file.tags["COMM::eng"] = COMM(encoding=3, lang='eng', desc='', text=[f"{vibe} | D: {danceability:.2f}"])
         audio_file.save(v2_version=3)
+
+        # Safe to remove the source WAV now that the AIFF is fully tagged
+        if wav_to_delete:
+            os.remove(wav_to_delete)
 
         return {"original_path": current_file_path, "filename": filename, "genre": top_genre, "status": "success"}
     except Exception as e:
@@ -127,11 +98,12 @@ def analyze_track(file_path):
 
 
 def ensure_models_exist():
-    if not os.path.exists(MODELS_DIR): os.makedirs(MODELS_DIR)
+    os.makedirs(MODELS_DIR, exist_ok=True)
     for url in MODEL_URLS.values():
         filepath = os.path.join(MODELS_DIR, url.split('/')[-1])
         if not os.path.exists(filepath):
-            urllib.request.urlretrieve(url, filepath)
+            print(f"Downloading {os.path.basename(filepath)}...")
+            download_with_progress(url, filepath)
 
 
 def sanitize_folder_name(name):
@@ -143,22 +115,23 @@ if __name__ == "__main__":
     ensure_models_exist()
 
     print("📋 Scanning library...")
-    all_tracks = []
-    for root, _, files in os.walk(LIBRARY_PATH):
-        for f in files:
-            if f.lower().endswith(('.mp3', '.wav', '.aiff', '.aif')):
-                all_tracks.append(os.path.join(root, f))
+    all_tracks = [
+        os.path.join(root, f)
+        for root, _, files in os.walk(LIBRARY_PATH)
+        for f in files
+        if not f.startswith('.') and f.lower().endswith(('.mp3', '.wav', '.aiff', '.aif'))
+    ]
 
     total = len(all_tracks)
+    if total == 0:
+        print("No tracks found. Check your LIBRARY_PATH.")
+        exit(0)
+
     print(f"🚀 Found {total} tracks. Parallelizing across {NUM_WORKERS} cores...")
 
-    # Start the worker pool
     move_queue = []
     with Pool(processes=NUM_WORKERS, initializer=init_worker) as pool:
-        # map_async allows us to track progress
-        results = []
         for i, res in enumerate(pool.imap_unordered(analyze_track, all_tracks), 1):
-            results.append(res)
             if res['status'] == "success":
                 print(f"[{i / total * 100:.1f}%] ({i}/{total}) ✅ {res['genre']} | {res['filename']}")
                 move_queue.append(res)
@@ -168,8 +141,14 @@ if __name__ == "__main__":
     if move_queue:
         choice = input(f"\nAnalysis complete. Move {len(move_queue)} files? (y/n): ")
         if choice.lower() == 'y':
+            moved = failed = 0
             for item in move_queue:
-                target_dir = os.path.join(DESTINATION_PATH, sanitize_folder_name(item['genre']))
-                if not os.path.exists(target_dir): os.makedirs(target_dir)
-                shutil.move(item['original_path'], os.path.join(target_dir, item['filename']))
-            print("\n✅ Library organized.")
+                try:
+                    target_dir = os.path.join(DESTINATION_PATH, sanitize_folder_name(item['genre']))
+                    os.makedirs(target_dir, exist_ok=True)
+                    shutil.move(item['original_path'], os.path.join(target_dir, item['filename']))
+                    moved += 1
+                except Exception as e:
+                    failed += 1
+                    print(f"❌ Move failed: {item['filename']} — {e}")
+            print(f"\n✅ Moved: {moved} | Failed: {failed}")

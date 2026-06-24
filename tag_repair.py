@@ -5,16 +5,17 @@ import essentia.standard as es
 from mutagen import File
 from mutagen.id3 import TCON, TIT3, COMM
 from multiprocessing import Pool
+from utils import get_vibe
 
 essentia.log.warningActive = False
 essentia.log.infoActive = False
 
 LIBRARY_PATH = '/Users/jacobhaynes/Library/CloudStorage/GoogleDrive-jacobhaynes49@gmail.com/My Drive/Music'
-MODELS_DIR = './models'
 NUM_WORKERS = 10
 MUSIC_EXTENSIONS = ('.mp3', '.aiff', '.aif', '.wav')
 
-VALID_TAG_PATTERN = re.compile(r'^(PEAK|INTENSE|GROOVE|MODERN|HYPNOTIC|DEEP) \| D: \d+\.\d{2}$')
+VALID_COMM_PATTERN = re.compile(r'^(PEAK|INTENSE|GROOVE|MODERN|HYPNOTIC|DEEP) \| D: \d+\.\d{2}$')
+VALID_TIT3_PATTERN = re.compile(r'^E: \d+\.\d$')
 
 worker_models = {}
 
@@ -25,28 +26,23 @@ def init_worker():
     worker_models['extractor'] = es.MusicExtractor(lowlevelStats=['mean'])
 
 
-def get_vibe(energy, dance):
-    if energy > 0.7:
-        return "PEAK" if dance > 1.2 else "INTENSE"
-    elif energy > 0.4:
-        return "GROOVE" if dance > 1.2 else "MODERN"
-    else:
-        return "HYPNOTIC" if dance > 1.2 else "DEEP"
-
-
-def needs_repair(file_path):
-    audio = File(file_path)
+def _tags_are_valid(audio):
     if audio is None or audio.tags is None:
-        return True
+        return False
     comm = audio.tags.get("COMM::eng")
-    if comm is None:
-        return True
-    return not VALID_TAG_PATTERN.match(str(comm.text[0]).strip())
+    tit3 = audio.tags.get("TIT3")
+    if comm is None or tit3 is None:
+        return False
+    return (
+        VALID_COMM_PATTERN.match(str(comm.text[0]).strip()) and
+        VALID_TIT3_PATTERN.match(str(tit3.text[0]).strip())
+    )
 
 
 def repair_track(file_path):
     try:
-        if not needs_repair(file_path):
+        audio = File(file_path)
+        if _tags_are_valid(audio):
             return {"filename": os.path.basename(file_path), "status": "skipped"}
 
         features, _ = worker_models['extractor'](file_path)
@@ -55,7 +51,6 @@ def repair_track(file_path):
         vibe = get_vibe(energy, danceability)
         current_genre = os.path.basename(os.path.dirname(file_path))
 
-        audio = File(file_path)
         if audio is None:
             return {"filename": os.path.basename(file_path), "status": "error", "error": "Not a supported audio file"}
         if audio.tags is None:
@@ -85,6 +80,10 @@ if __name__ == "__main__":
     ]
 
     total = len(files)
+    if total == 0:
+        print("No tracks found. Check your LIBRARY_PATH.")
+        exit(0)
+
     print(f"📋 Found {total} tracks. Checking tags...")
 
     repaired = skipped = errors = 0

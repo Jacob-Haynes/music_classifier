@@ -28,6 +28,9 @@ For updating tags on an already organized library without moving files. Uses the
   - `TIT3` (Subtitle): Energy score (`E: x.x`).
   - `COMM` (Comment): Vibe label and danceability (`PEAK | D: x.xx`).
 
+### 4. `utils.py`
+Shared helpers used by all three scripts: `get_vibe()`, `convert_wav_to_aiff()`, and `download_with_progress()`. Not run directly.
+
 ### 3. `tag_repair.py`
 Scans an already organized library and re-tags only tracks whose comment tag doesn't match the expected `VIBE | D: x.xx` format. Useful for fixing tracks tagged by an older version of the scripts without re-processing everything.
 - **Workflow:** Scan -> Check tag format -> Re-tag if malformed.
@@ -54,7 +57,7 @@ Scans an already organized library and re-tags only tracks whose comment tag doe
    ```
 
 4. **Models:**
-   `dj_organiser.py` will automatically download the necessary models to the `./models` directory on first run. The other scripts use only Essentia's built-in feature extractor and require no model downloads.
+   `dj_organiser.py` automatically downloads the required models (~300 MB) to a `models/` directory alongside the script on first run, with progress output. `tag_only.py`, `tag_repair.py`, and `utils.py` use only Essentia's built-in feature extractor and require no model downloads.
 
 ## Configuration
 
