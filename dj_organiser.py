@@ -47,6 +47,16 @@ def init_worker():
     )
 
 
+def get_vibe(energy, dance):
+    """Translates energy/danceability scores into a human-readable vibe word."""
+    if energy > 0.7:
+        return "PEAK" if dance > 1.2 else "INTENSE"
+    elif energy > 0.4:
+        return "GROOVE" if dance > 1.2 else "MODERN"
+    else:
+        return "HYPNOTIC" if dance > 1.2 else "DEEP"
+
+
 def analyze_track(file_path):
     """The function each worker runs for a single track."""
     filename = os.path.basename(file_path)
@@ -59,6 +69,7 @@ def analyze_track(file_path):
         features, _ = worker_models['extractor'](file_path)
         danceability = features['rhythm.danceability']
         energy = features['lowlevel.average_loudness']
+        vibe = get_vibe(energy, danceability)
 
         # AI Genre Inference
         activations = worker_models['embeddings'](audio)
@@ -104,7 +115,7 @@ def analyze_track(file_path):
         audio_file.tags["TCON"] = TCON(encoding=3, text=[top_genre])
         audio_file.tags["TIT3"] = TIT3(encoding=3, text=[f"E: {energy:.1f}"])
         # desc='' is essential for Rekordbox to show the comment
-        comment_text = f"D: {danceability:.2f} | Conf: {confidence:.1f}%"
+        comment_text = f"{vibe} | D: {danceability:.2f}"
         audio_file.tags["COMM::eng"] = COMM(encoding=3, lang='eng', desc='', text=[comment_text])
         
         # Save with ID3v2.3 for maximum Rekordbox compatibility
